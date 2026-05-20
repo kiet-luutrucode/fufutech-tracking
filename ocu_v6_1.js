@@ -1,9 +1,10 @@
 /*!
- * FUFUTECH OCU v6.1.1 — DEDUP FIX (anti double-fire on mobile/Brave)
+ * FUFUTECH OCU v6.1.2 — PERSISTENT DEDUP (anti double-fire across reload/tabs)
  * Released: 2026-05-20
  * Loaded via jsDelivr CDN from GitHub
- * Fix vs v6.1: Add sendPayload dedup (key: type+client_id+gclid+mdh+phone, window 2500ms)
- * Fix vs v6.0: (1) phone selector dienthoai (Nasani), (2) text-pattern matching /hoan-tat, (3) cart total backup body text
+ * Fix vs v6.1.1: Move _lastSent dedupe from in-memory → localStorage (persist across page reload + multi-tab)
+ * Fix vs v6.1:   Add sendPayload dedup (key: type+client_id+gclid+mdh+phone, window 5000ms)
+ * Fix vs v6.0:   (1) phone selector dienthoai, (2) text-pattern /hoan-tat, (3) cart total backup body text
  * Endpoint: Apps Script Bridge (giữ nguyên)
  */
 (function(){
@@ -12,7 +13,7 @@
   // ========== CONFIG ==========
   var CFG = {
     ENDPOINT: 'https://script.google.com/macros/s/AKfycbxksRhf_kVaXXglwG4mka6qjlYOcW1cA6EYA7lm1uKnL6-Y22H3Q4B4pgQOlXLK4NGq/exec',
-    VERSION: 'v6.1.1',
+    VERSION: 'v6.1.2',
     CLIENT_ID_KEY: 'ff_client_id',
     CLIENT_ID_META: 'ff_client_id_meta',
     CONV_HIST_KEY: 'ff_conv_history_v61',
@@ -20,11 +21,12 @@
     QUEUE_KEY: 'ff_queue_v61',
     MKT_SEEN_KEY: 'ff_mkt_seen',
     SESSION_FLAGS_KEY: 'ff_session_flags_v61',
+    LAST_SENT_KEY: 'ff_last_sent_v612',
     DEDUP_MS: 30 * 86400000,
     PURCHASE_DEDUP_MS: 90 * 86400000,
     QUEUE_TTL_MS: 24 * 3600000,
     CLIENT_ID_TTL_MS: 365 * 86400000,
-    SEND_DEDUP_MS: 2500
+    SEND_DEDUP_MS: 5000
   };
 
   if (window.__ocu_v61_active) { return; }
@@ -268,26 +270,45 @@
   // ============================================================
   // [v6.1.1 DEDUP] In-memory map chống fire trùng trong 2500ms
   // Key: type|client_id|gclid|mdh|phone
-  // Phòng chống: sendBeacon retry trên mobile/Brave, double-tap user
+  // Phòng chống: sendBeacon retry trên mobile/Brave, double-tap user,
+  // PAGE RELOAD trong window dedup, MULTI-TAB fire cùng lúc, history.back()
   // ============================================================
-  var _lastSent = {};
+  // [v6.1.2] Dedupe persist qua localStorage để chống:
+  //   (a) reload page → _lastSent in-memory mất
+  //   (b) multi-tab → mỗi tab có _lastSent riêng
+  //   (c) navigate trang → script reload, state mất
+  // ============================================================
+
+  function _loadLastSent(){
+    var m = jp(lsGet(CFG.LAST_SENT_KEY), {});
+    return (m && typeof m === 'object') ? m : {};
+  }
+  function _saveLastSent(m){
+    try { lsSet(CFG.LAST_SENT_KEY, JSON.stringify(m)); } catch(e){}
+  }
 
   function sendPayload(p){
-    // [v6.1.1 DEDUP] Chặn cùng key fire trong SEND_DEDUP_MS
+    // [v6.1.2 PERSISTENT DEDUP] Đọc lastSent từ localStorage mỗi lần
     var dedupKey = (p.type||'') + '|' + (p.client_id||'') + '|' + (p.gclid||'') + '|' + (p.mdh||'') + '|' + (p.phone||'');
     var now = Date.now();
-    if (_lastSent[dedupKey] && (now - _lastSent[dedupKey]) < CFG.SEND_DEDUP_MS) {
-      try { console.warn('[OCU v6.1.1] dedup skipped:', dedupKey); } catch(e){}
+    var lastSent = _loadLastSent();
+
+    if (lastSent[dedupKey] && (now - lastSent[dedupKey]) < CFG.SEND_DEDUP_MS) {
+      try { console.warn('[OCU v6.1.2] dedup skipped (persistent):', dedupKey, 'delta=', now - lastSent[dedupKey], 'ms'); } catch(e){}
       return 'deduped';
     }
-    _lastSent[dedupKey] = now;
-    // Cleanup map nếu quá 100 entries
-    var keys = Object.keys(_lastSent);
-    if (keys.length > 100) {
+
+    // Set BEFORE network call (race-condition safe vs sendBeacon retry)
+    lastSent[dedupKey] = now;
+
+    // Cleanup entries quá 60s (chỉ giữ 30s buffer xung quanh window 5s để map nhỏ gọn)
+    var keys = Object.keys(lastSent);
+    if (keys.length > 50) {
       for (var i = 0; i < keys.length; i++) {
-        if (now - _lastSent[keys[i]] > 60000) delete _lastSent[keys[i]];
+        if (now - lastSent[keys[i]] > 60000) delete lastSent[keys[i]];
       }
     }
+    _saveLastSent(lastSent);
 
     if (tryBeacon(p)) return 'beacon';
     if (tryFetch(p))  return 'fetch';
@@ -497,7 +518,8 @@
     _phoneSelector: PHONE_SELECTOR,
     _maskPhone: maskPhone,
     _getURLParam: getURLParam,
-    _dedupMap: function(){ return _lastSent; }
+    _dedupMap: function(){ return _loadLastSent(); },
+    _clearDedup: function(){ try { localStorage.removeItem(CFG.LAST_SENT_KEY); return true; } catch(e){ return false; } }
   };
 
   if (document.readyState === 'loading'){
