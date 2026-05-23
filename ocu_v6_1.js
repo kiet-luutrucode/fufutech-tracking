@@ -1,7 +1,9 @@
 /*!
- * FUFUTECH OCU v6.1.2 — PERSISTENT DEDUP (anti double-fire across reload/tabs)
- * Released: 2026-05-20
+ * FUFUTECH OCU v6.1.4 — TTL CHECK for old /hoan-tat links (FIX NN105 bug 23/5)
+ * Released: 2026-05-23
  * Loaded via jsDelivr CDN from GitHub
+ * Fix vs v6.1.2: Add TTL 7-day check in firePurchase — link cũ >7 ngày KHÔNG fire purchase
+ *                Phòng case khách mở email/SMS cũ → trùng MDH lên Ads
  * Fix vs v6.1.1: Move _lastSent dedupe from in-memory → localStorage (persist across page reload + multi-tab)
  * Fix vs v6.1:   Add sendPayload dedup (key: type+client_id+gclid+mdh+phone, window 5000ms)
  * Fix vs v6.0:   (1) phone selector dienthoai, (2) text-pattern /hoan-tat, (3) cart total backup body text
@@ -13,7 +15,8 @@
   // ========== CONFIG ==========
   var CFG = {
     ENDPOINT: 'https://script.google.com/macros/s/AKfycbxksRhf_kVaXXglwG4mka6qjlYOcW1cA6EYA7lm1uKnL6-Y22H3Q4B4pgQOlXLK4NGq/exec',
-    VERSION: 'v6.1.2',
+    VERSION: 'v6.1.4',
+    PURCHASE_TTL_DAYS: 7,
     CLIENT_ID_KEY: 'ff_client_id',
     CLIENT_ID_META: 'ff_client_id_meta',
     CONV_HIST_KEY: 'ff_conv_history_v61',
@@ -337,10 +340,32 @@
     } catch(e){ return 0; }
   }
 
+  // [v6.1.3 TTL CHECK] Parse MDH format: DDMMYYYYNN... → order date
+  // Trả về số ngày tuổi của đơn, hoặc -1 nếu không parse được
+  function getMdhAgeDays(mdh){
+    try {
+      if (!mdh || mdh.length < 8) return -1;
+      var dd = parseInt(mdh.substring(0, 2), 10);
+      var mm = parseInt(mdh.substring(2, 4), 10);
+      var yyyy = parseInt(mdh.substring(4, 8), 10);
+      if (!dd || !mm || !yyyy || dd > 31 || mm > 12 || yyyy < 2025 || yyyy > 2030) return -1;
+      var orderDate = new Date(yyyy, mm - 1, dd);
+      if (isNaN(orderDate.getTime())) return -1;
+      var ageMs = Date.now() - orderDate.getTime();
+      return Math.floor(ageMs / 86400000);
+    } catch(e){ return -1; }
+  }
+
   function firePurchase(){
     if ((location.pathname || '').indexOf('hoan-tat') < 0) return;
     var mdh = getURLParam('mdh');
     if (!mdh) return;
+    // [v6.1.3 TTL CHECK] SKIP nếu khách mở link cũ > 7 ngày (chống dup NN105)
+    var age = getMdhAgeDays(mdh);
+    if (age > CFG.PURCHASE_TTL_DAYS) {
+      try { console.warn('[OCU v6.1.4] SKIP purchase - link cũ ' + age + ' ngày > ' + CFG.PURCHASE_TTL_DAYS + ' (MDH=' + mdh + ')'); } catch(e){}
+      return;
+    }
     if (purchaseSeen(mdh)) return;
     var phone = normalizePhoneVN(
       readHoanTatPhone() ||
